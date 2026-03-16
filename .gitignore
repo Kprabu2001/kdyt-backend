@@ -2,4 +2,5 @@ __pycache__/
 *.pyc
 .env
 venv/
-cookies.txt
+.git
+node_modules

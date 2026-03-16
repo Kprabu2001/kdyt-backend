@@ -38,6 +38,9 @@ def _base_args() -> list[str]:
         "--no-check-certificates",
         "--extractor-args", "youtube:player-client=tv_embedded",
         "--no-warnings",
+        # Mimic browser
+        "--add-header",
+        "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     ]
     if cfg.ytdlp_proxy:
         args += ["--proxy", cfg.ytdlp_proxy]
