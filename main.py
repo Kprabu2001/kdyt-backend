@@ -23,9 +23,14 @@ from app.core.limiter import limiter
 # ── Settings ──────────────────────────────────────────────────────
 cfg = get_settings()
 
+origins_list = [
+    "http://localhost:3000",
+    "https://kdyt.vercel.app"
+]
+
 # ── App factory ───────────────────────────────────────────────────
 app = FastAPI(
-    title="SwiftDL API",
+    title="KDYT API",
     description="YouTube video & MP3 downloader — REST API",
     version="1.0.0",
     docs_url="/api/docs",
@@ -37,11 +42,12 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
 # ── Middleware (order matters — outermost runs last) ──────────────
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cfg.origins_list,
+    allow_origins=origins_list,
     allow_methods=["GET"],
     allow_headers=["*"],
 )
@@ -72,7 +78,7 @@ else:
     @app.get("/", include_in_schema=False)
     async def root():
         return JSONResponse({
-            "message": "SwiftDL API is running.",
+            "message": "KDYT API is running.",
             "docs": "/api/docs",
             "note": "Build the React frontend and place it in frontend/dist/ to serve the UI.",
         })
