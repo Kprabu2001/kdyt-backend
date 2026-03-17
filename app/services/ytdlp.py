@@ -42,6 +42,7 @@ def _base_args() -> list[str]:
         "--no-warnings",
         "--add-header",
         "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "--extractor-args", "youtube:player_client=web",
     ]
     if cfg.resolved_cookies_file and os.path.isfile(cfg.resolved_cookies_file):
         args += ["--cookies", cfg.resolved_cookies_file]
@@ -99,23 +100,25 @@ async def _stream_subprocess(args: list[str]) -> AsyncGenerator[bytes, None]:
 
 
 async def get_video_info(url: str) -> VideoInfo:
-    raw  = await _run("--dump-json", "--no-playlist", url)
+    raw  = await _run("--dump-json", "--no-playlist",
+                      "--format", "bestvideo+bestaudio/best",
+                      url)
     info = json.loads(raw)
 
     seen:          set[str]          = set()
     video_formats: list[VideoFormat] = []
     cfg = get_settings()
 
-    # Sort by height descending so we get best quality first.
-    # We accept video-only streams (no audio track) because YouTube serves
-    # all resolutions above 480p as separate video+audio streams.
-    # stream_video() merges the best audio back in via +bestaudio selector.
     for fmt in sorted(info.get("formats", []), key=lambda f: -(f.get("height") or 0)):
         has_video = fmt.get("vcodec", "none") != "none"
         height    = fmt.get("height")
 
-        # Must have video and a known height — audio-only streams are excluded
         if not (has_video and height):
+            continue
+
+        # Skip formats that require a protocol not available on server
+        protocol = fmt.get("protocol", "")
+        if protocol in ("rtmp", "rtmpe", "m3u8_native") :
             continue
 
         fps       = fmt.get("fps") or 0
@@ -124,8 +127,6 @@ async def get_video_info(url: str) -> VideoInfo:
 
         if label not in seen:
             seen.add(label)
-            # Encode height into format_id as "id|height" so stream_video
-            # can build precise fallback selectors for merged video+audio
             video_formats.append(VideoFormat(
                 format_id=f"{fmt['format_id']}|{height}",
                 quality=label,
