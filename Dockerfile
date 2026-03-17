@@ -25,7 +25,10 @@ RUN git clone --depth 1 --branch 1.3.1 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
     && cd /bgutil/server \
     && npm ci \
-    && npx tsc --skipLibCheck
+    && ./node_modules/.bin/tsc --skipLibCheck \
+    && ls -la /bgutil/server/build/ \
+    && test -f /bgutil/server/build/main.js \
+    && echo "bgutil build SUCCESS"
 
 # Copy Python packages from builder
 COPY --from=builder /install/deps /usr/local
@@ -42,7 +45,9 @@ USER appuser
 EXPOSE 10000
 
 CMD ["sh", "-c", "\
+    echo '[startup] Starting bgutil...' && \
     node /bgutil/server/build/main.js & \
-    sleep 3 && \
-    yt-dlp -U --quiet && \
+    echo '[startup] bgutil PID='$! && \
+    sleep 8 && \
+    echo '[startup] Starting uvicorn...' && \
     uvicorn main:app --host 0.0.0.0 --port 10000"]
