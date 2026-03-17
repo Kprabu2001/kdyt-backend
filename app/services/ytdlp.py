@@ -33,26 +33,18 @@ _STATIC_AUDIO_FORMATS: list[VideoFormat] = [
 
 def _base_args() -> list[str]:
     """
-    Build yt-dlp base arguments.
-    - Uses multiple player-client fallbacks: tv_embedded -> web_creator -> ios.
-    - LOCAL DEV: uses --cookies-from-browser chrome automatically (no file needed).
-    - PRODUCTION: loads cookies.txt if YTDLP_COOKIES_FILE env var is set.
-    - Optionally routes through proxy if YTDLP_PROXY env var is set.
+    bgutil-ytdlp-pot-provider plugin auto-supplies PO tokens via HTTP server
+    running on 127.0.0.1:4416 — no manual extractor-args needed.
     """
     cfg = get_settings()
     args = [
         "--no-check-certificates",
-        "--extractor-args", "youtube:player-client=tv_embedded,web_creator,ios",
         "--no-warnings",
         "--add-header",
         "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ]
-    # Production: use exported cookies.txt file (set YTDLP_COOKIES_FILE env var)
     if cfg.ytdlp_cookies_file and os.path.isfile(cfg.ytdlp_cookies_file):
         args += ["--cookies", cfg.ytdlp_cookies_file]
-    # Local dev: auto-read cookies from Chrome browser (no file needed)
-    elif cfg.ytdlp_cookies_browser:
-        args += ["--cookies-from-browser", cfg.ytdlp_cookies_browser]
     if cfg.ytdlp_proxy:
         args += ["--proxy", cfg.ytdlp_proxy]
     return args

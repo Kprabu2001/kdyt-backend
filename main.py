@@ -24,7 +24,7 @@ from app.core.limiter import limiter
 cfg = get_settings()
 
 origins_list = [
-    "http://localhost:3000",
+    "http://localhost:5173",
     "https://kdyt.vercel.app"
 ]
 
