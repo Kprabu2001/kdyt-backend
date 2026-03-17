@@ -43,8 +43,8 @@ def _base_args() -> list[str]:
         "--add-header",
         "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ]
-    if cfg.ytdlp_cookies_file and os.path.isfile(cfg.ytdlp_cookies_file):
-        args += ["--cookies", cfg.ytdlp_cookies_file]
+    if cfg.resolved_cookies_file and os.path.isfile(cfg.resolved_cookies_file):
+        args += ["--cookies", cfg.resolved_cookies_file]
     if cfg.ytdlp_proxy:
         args += ["--proxy", cfg.ytdlp_proxy]
     return args

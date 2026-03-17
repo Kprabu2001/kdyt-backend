@@ -25,10 +25,7 @@ RUN git clone --depth 1 --branch 1.3.1 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
     && cd /bgutil/server \
     && npm ci \
-    && ./node_modules/.bin/tsc --skipLibCheck \
-    && ls -la /bgutil/server/build/ \
-    && test -f /bgutil/server/build/main.js \
-    && echo "bgutil build SUCCESS"
+    && npx tsc --skipLibCheck
 
 # Copy Python packages from builder
 COPY --from=builder /install/deps /usr/local
@@ -36,18 +33,26 @@ COPY --from=builder /install/deps /usr/local
 WORKDIR /app
 COPY . .
 
+# Remove any local cookies.txt so secrets never end up in the image.
+# Cookies are injected at runtime via YTDLP_COOKIES_B64 env var.
+RUN rm -f /app/cookies.txt
+
 RUN useradd -m appuser \
     && chown -R appuser /app \
-    && chown -R appuser /bgutil
+    && chown -R appuser /bgutil \
+    # Ensure appuser can write to /tmp for runtime cookie file
+    && chmod 1777 /tmp
 
 USER appuser
 
 EXPOSE 10000
 
+# Env vars to set on Render (do NOT hardcode secrets here):
+#   YTDLP_COOKIES_B64          — base64-encoded cookies.txt content
+#   COOKIE_REFRESH_INTERVAL    — seconds between auto-refresh (default 3600)
+
 CMD ["sh", "-c", "\
-    echo '[startup] Starting bgutil...' && \
     node /bgutil/server/build/main.js & \
-    echo '[startup] bgutil PID='$! && \
-    sleep 8 && \
-    echo '[startup] Starting uvicorn...' && \
+    sleep 3 && \
+    yt-dlp -U --quiet && \
     uvicorn main:app --host 0.0.0.0 --port 10000"]
