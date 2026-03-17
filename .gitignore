@@ -4,3 +4,4 @@ __pycache__/
 venv/
 .git
 node_modules
+cookies.txt
