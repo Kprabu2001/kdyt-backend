@@ -40,7 +40,7 @@ def _base_args() -> list[str]:
         "--no-warnings",
         # Mimic browser
         "--add-header",
-        "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ]
     if cfg.ytdlp_proxy:
         args += ["--proxy", cfg.ytdlp_proxy]

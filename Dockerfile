@@ -19,7 +19,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install yt-dlp binary (kept separate so it can be updated without rebuilding)
-RUN pip install --no-cache-dir yt-dlp
+RUN pip install --no-cache-dir --upgrade yt-dlp
 
 # Copy installed Python packages from builder
 COPY --from=builder /install/deps /usr/local
@@ -33,4 +33,4 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD ["sh", "-c", "yt-dlp -U && uvicorn main:app --host 0.0.0.0 --port 10000"]

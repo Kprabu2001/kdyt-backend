@@ -3,7 +3,7 @@ uvicorn[standard]==0.32.1
 slowapi==0.1.9
 pydantic-settings==2.7.0
 python-multipart==0.0.20
-yt-dlp>=2025.1.1
+yt-dlp>=2025.3.1
 
 # Dev / testing only
 pytest==8.3.4
