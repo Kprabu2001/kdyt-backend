@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     ytdlp_timeout:          int = 45
     ytdlp_download_timeout: int = 600
     ytdlp_proxy:            str = ""   # optional: "socks5://127.0.0.1:1080"
+    ytdlp_cookies_file:     str = ""   # Production: "/app/cookies.txt"
+    ytdlp_cookies_browser:  str = ""   # Local dev:  "chrome" or "firefox"
 
     # ── Rate limits ───────────────────────────────────────────────
     rate_limit_info:     str = "30/15minutes"
