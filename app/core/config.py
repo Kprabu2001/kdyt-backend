@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     ytdlp_cookies_file:     str = ""   # Explicit file path (overrides b64)
     ytdlp_cookies_b64:      str = ""   # Base64-encoded cookies.txt (for Render)
     ytdlp_cookies_browser:  str = ""   # Local dev:  "chrome" or "firefox"
+    use_cookies: bool = False
 
     # ── Rate limits ───────────────────────────────────────────────
     rate_limit_info:     str = "30/15minutes"

@@ -42,13 +42,20 @@ def _base_args() -> list[str]:
         "--no-warnings",
         "--add-header",
         "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "--extractor-args", "youtube:player_client=web",
+        "--extractor-args", "youtube:player_client=android",
+        "--sleep-interval", "3",
+        "--max-sleep-interval", "6",
     ]
-    if cfg.resolved_cookies_file and os.path.isfile(cfg.resolved_cookies_file):
+     # optional cookies
+    if getattr(cfg, "use_cookies", False) and cfg.resolved_cookies_file:
         args += ["--cookies", cfg.resolved_cookies_file]
-    if cfg.ytdlp_proxy:
-        args += ["--proxy", cfg.ytdlp_proxy]
+
     return args
+    # if cfg.resolved_cookies_file and os.path.isfile(cfg.resolved_cookies_file):
+    #     args += ["--cookies", cfg.resolved_cookies_file]
+    # if cfg.ytdlp_proxy:
+    #     args += ["--proxy", cfg.ytdlp_proxy]
+    # return args
 
 
 async def _run(*args: str, timeout: int | None = None) -> str:
