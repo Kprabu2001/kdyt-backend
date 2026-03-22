@@ -87,7 +87,7 @@ def _fmt_size(b) -> str:
     return f"{b} B"
 
 # ── yt-dlp extractor ──────────────────────────────────────────────
-def _ydl_opts(cookies_file: Optional[str] = None, *, relaxed: bool = False) -> dict:
+def _ydl_opts(cookies_file: Optional[str] = None, *, player_clients: Optional[list] = None) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -101,13 +101,11 @@ def _ydl_opts(cookies_file: Optional[str] = None, *, relaxed: bool = False) -> d
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
         },
-        # Use the web client + enable PO token plugin if installed
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web"] if not relaxed else ["mweb", "web"],
-            },
-        },
     }
+    if player_clients:
+        opts["extractor_args"] = {
+            "youtube": {"player_client": player_clients},
+        }
     if cookies_file:
         opts["cookiefile"] = cookies_file
         logger.info(f"[yt-dlp] Using cookies: {cookies_file}")
@@ -115,26 +113,36 @@ def _ydl_opts(cookies_file: Optional[str] = None, *, relaxed: bool = False) -> d
 
 
 def _extract_with_ytdlp(video_id: str) -> dict:
-    """Try extraction; on bot-detection error, retry once with relaxed options."""
+    """Multi-strategy extraction with fallbacks for bot detection."""
     import yt_dlp
     cookies_file = _get_cookies_file()
     url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # First attempt — normal options
-    opts = _ydl_opts(cookies_file)
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
-    except Exception as first_err:
-        err_str = str(first_err).lower()
-        if "sign in" not in err_str and "bot" not in err_str:
-            raise  # not a bot-detection error, don't retry
+    # Strategy list: (label, cookies, player_clients)
+    strategies = [
+        ("web_creator + cookies",   cookies_file, ["web_creator"]),
+        ("web_creator no-cookies",  None,         ["web_creator", "web"]),
+        ("tv_embedded no-cookies",  None,         ["tv_embedded"]),
+    ]
 
-    # Retry — relaxed options (mweb fallback, no cookies)
-    logger.warning(f"[yt-dlp] Bot-detection on first try, retrying with relaxed opts…")
-    retry_opts = _ydl_opts(cookies_file, relaxed=True)
-    with yt_dlp.YoutubeDL(retry_opts) as ydl:
-        return ydl.extract_info(url, download=False)
+    last_err = None
+    for label, cfile, clients in strategies:
+        logger.info(f"[yt-dlp] Trying strategy: {label}")
+        opts = _ydl_opts(cfile, player_clients=clients)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            if "sign in" in err_str or "bot" in err_str:
+                logger.warning(f"[yt-dlp] Strategy '{label}' hit bot detection, trying next…")
+                continue
+            # Non-bot error (private video, etc.) — don't retry
+            raise
+
+    # All strategies exhausted
+    raise last_err
 
 def _parse_ytdlp_formats(info: dict) -> tuple[list[dict], list[dict]]:
     vfmts: list[dict] = []
