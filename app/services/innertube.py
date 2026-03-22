@@ -144,16 +144,67 @@ async def _fetch_oembed(video_id: str, http: httpx.AsyncClient) -> dict:
 
 
 # ── InnerTube strategies ──────────────────────────────────────────
-# With cookies: WEB client works for everything including Shorts
-# Without cookies: WEB_EMBEDDED / TV_EMBEDDED / ANDROID_VR for regular videos
-
 async def _try_player(video_id: str, http: httpx.AsyncClient) -> Optional[dict]:
     cookie_hdr = _cookies()
     has_cookies = bool(cookie_hdr)
 
     strategies = []
 
-    # If we have cookies, try WEB client first — works for ALL videos including Shorts
+    # ── IOS — bypasses PO token, works on datacenter/server IPs ──
+    strategies.append({
+        "name": "IOS",
+        "url":  f"{_PLAYER_URL}?key=AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc&prettyPrint=false",
+        "payload": {
+            "videoId": video_id,
+            "context": {"client": {
+                "hl": "en", "gl": "US",
+                "clientName": "IOS",
+                "clientVersion": "19.29.1",
+                "deviceModel": "iPhone16,2",
+                "userAgent": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
+                "osName": "iPhone",
+                "osVersion": "17.5.1.21F90",
+            }},
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
+            "X-YouTube-Client-Name": "5",
+            "X-YouTube-Client-Version": "19.29.1",
+            "Origin": "https://www.youtube.com",
+        },
+    })
+
+    # ── ANDROID — another strong fallback for server IPs ─────────
+    strategies.append({
+        "name": "ANDROID",
+        "url":  f"{_PLAYER_URL}?key=AIzaSyA8eiZmM1lafRM_YTQ1z2Ud2G_3cNPF9E0&prettyPrint=false",
+        "payload": {
+            "videoId": video_id,
+            "context": {"client": {
+                "hl": "en", "gl": "US",
+                "clientName": "ANDROID",
+                "clientVersion": "19.29.37",
+                "androidSdkVersion": 34,
+                "userAgent": "com.google.android.youtube/19.29.37(Linux; U; Android 14) gzip",
+                "osName": "Android",
+                "osVersion": "14",
+            }},
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "com.google.android.youtube/19.29.37(Linux; U; Android 14) gzip",
+            "X-YouTube-Client-Name": "3",
+            "X-YouTube-Client-Version": "19.29.37",
+            "Origin": "https://www.youtube.com",
+        },
+    })
+
+    # ── WEB+cookies — works if cookies are fresh ─────────────────
     if has_cookies:
         strategies.append({
             "name": "WEB+cookies",
@@ -175,13 +226,13 @@ async def _try_player(video_id: str, http: httpx.AsyncClient) -> Optional[dict]:
                 "X-YouTube-Client-Name": "1",
                 "X-YouTube-Client-Version": "2.20240726.00.00",
                 "Origin":  "https://www.youtube.com",
-                "Referer": f"https://www.youtube.com/shorts/{video_id}",
+                "Referer": f"https://www.youtube.com/watch?v={video_id}",
                 "Accept-Language": "en-US,en;q=0.9",
                 **cookie_hdr,
             },
         })
 
-    # WEB_EMBEDDED — works for most regular videos without cookies
+    # ── WEB_EMBEDDED ──────────────────────────────────────────────
     strategies.append({
         "name": "WEB_EMBEDDED",
         "url":  _PLAYER_URL,
@@ -204,7 +255,7 @@ async def _try_player(video_id: str, http: httpx.AsyncClient) -> Optional[dict]:
         },
     })
 
-    # TV_EMBEDDED
+    # ── TV_EMBEDDED ───────────────────────────────────────────────
     strategies.append({
         "name": "TV_EMBEDDED",
         "url":  _PLAYER_URL,
@@ -227,7 +278,7 @@ async def _try_player(video_id: str, http: httpx.AsyncClient) -> Optional[dict]:
         },
     })
 
-    # ANDROID_VR
+    # ── ANDROID_VR ───────────────────────────────────────────────
     strategies.append({
         "name": "ANDROID_VR",
         "url":  f"{_PLAYER_URL}?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false",
@@ -246,7 +297,7 @@ async def _try_player(video_id: str, http: httpx.AsyncClient) -> Optional[dict]:
         },
     })
 
-    # ANDROID_MUSIC
+    # ── ANDROID_MUSIC ────────────────────────────────────────────
     strategies.append({
         "name": "ANDROID_MUSIC",
         "url":  f"{_PLAYER_URL}?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false",
