@@ -1,7 +1,7 @@
 # app/api/endpoints/tunnel.py
-# Y2Mate tunnel — accepts video_id directly, returns CDN URL
 import logging
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 from app.core.limiter import limiter
 from app.services.innertube import get_video_info
 from app.utils.validators import sanitize_filename
@@ -42,15 +42,29 @@ async def get_tunnel_url(
             audio_url = (m4a or raw_audio[0])["url"] if (m4a or raw_audio) else ""
 
         filename = sanitize_filename(info["title"])
+
+        # If video has its own audio (has_audio=True), redirect directly — like vidssave
+        if fmt.get("has_audio") or not audio_url:
+            return RedirectResponse(
+                url=video_url,
+                status_code=302,
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}.mp4"',
+                    "Access-Control-Allow-Origin": "*",
+                }
+            )
+
+        # Split video+audio — return URLs for frontend to handle muxing
         return {
-            "type":      "direct" if not audio_url else "split",
+            "type":      "split",
             "url":       video_url,
             "audio_url": audio_url,
             "filename":  filename,
             "filesize":  fmt.get("filesize_bytes") or 0,
             "quality":   fmt["quality"],
-            "needs_mux": bool(audio_url),
+            "needs_mux": True,
         }
+
     except HTTPException:
         raise
     except RuntimeError as exc:

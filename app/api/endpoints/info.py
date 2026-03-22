@@ -39,12 +39,7 @@ async def get_info(
             raise HTTPException(status_code=400, detail="Video not found, private, or deleted.")
         if "login" in ml or "age" in ml or "restricted" in ml:
             raise HTTPException(status_code=400, detail="Age-restricted or members-only video.")
-        if "cookies" in ml or "shorts" in ml or "stream" in ml:
-            raise HTTPException(
-                status_code=502,
-                detail="This video (Short) requires cookies to download. Add cookies.txt to your backend folder."
-            )
-        raise HTTPException(status_code=502, detail=f"YouTube error: {msg[:200]}")
+        raise HTTPException(status_code=502, detail="Unable to fetch video. Please try again later.")
     except Exception as exc:
         logger.error(f"[info] unexpected: {repr(exc)}")
         raise HTTPException(status_code=500, detail=str(exc)[:200])
