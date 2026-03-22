@@ -1,54 +1,94 @@
 # app/services/innertube.py
-# Uses yt-dlp to extract video info and stream URLs reliably.
+# Uses cookies for Shorts (required by YouTube for server IPs)
+# Regular videos work without cookies.
 
+import asyncio
 import base64
 import logging
 import os
 import re
+import tempfile
 from typing import Optional
 
 import httpx
+import json
 
 logger = logging.getLogger(__name__)
 
+_PLAYER_URL = "https://www.youtube.com/youtubei/v1/player"
 _OEMBED_URL = "https://www.youtube.com/oembed"
 
-# ── Cookie support (cached) ───────────────────────────────────────
-_cached_cookies_path: Optional[str] = None
+# ── Cookie support ────────────────────────────────────────────────
+# Set YOUTUBE_COOKIES env var to base64-encoded Netscape cookies.txt
+# OR set YOUTUBE_COOKIES_FILE to a path of cookies.txt
+# Get cookies: install "Get cookies.txt LOCALLY" Chrome extension
+#              → export cookies for youtube.com → save as cookies.txt
 
-def _get_cookies_file() -> Optional[str]:
-    """Return path to a valid cookies.txt file, or None.  Cached after first call."""
-    global _cached_cookies_path
-    if _cached_cookies_path and os.path.isfile(_cached_cookies_path):
-        return _cached_cookies_path
+def _get_cookie_header() -> dict:
+    """
+    Read cookies.txt (Netscape format) and return as Cookie header dict.
+    Tries: YOUTUBE_COOKIES_FILE env → YOUTUBE_COOKIES_B64 env → cookies.txt in cwd
+    """
+    txt = ""
 
-    # Method 1: explicit file path
+    # Method 1: file path
     path = os.environ.get("YOUTUBE_COOKIES_FILE", "")
     if path and os.path.isfile(path):
-        _cached_cookies_path = path
-        return path
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            txt = f.read()
 
-    # Method 2: base64 env var → write to temp file ONCE
-    b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
-    if b64:
-        try:
-            import tempfile
-            txt = base64.b64decode(b64).decode("utf-8")
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w")
-            tmp.write(txt)
-            tmp.close()
-            logger.info(f"[cookies] Wrote cookies from B64 env to {tmp.name}")
-            _cached_cookies_path = tmp.name
-            return tmp.name
-        except Exception as e:
-            logger.warning(f"[cookies] B64 decode failed: {e}")
+    # Method 2: base64 env var
+    if not txt:
+        b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+        if b64:
+            try:
+                txt = base64.b64decode(b64).decode("utf-8")
+            except Exception:
+                pass
 
     # Method 3: cookies.txt in working directory
-    if os.path.isfile("cookies.txt"):
-        _cached_cookies_path = "cookies.txt"
-        return "cookies.txt"
+    if not txt and os.path.isfile("cookies.txt"):
+        with open("cookies.txt", "r", encoding="utf-8", errors="replace") as f:
+            txt = f.read()
 
-    return None
+    if not txt:
+        return {}
+
+    # Parse Netscape cookies.txt → Cookie header string
+    cookies = {}
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            name  = parts[5]
+            value = parts[6]
+            cookies[name] = value
+
+    if not cookies:
+        return {}
+
+    cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    logger.info(f"[cookies] Loaded {len(cookies)} cookies")
+    return {"Cookie": cookie_str}
+
+
+# Cache cookies so we don't re-read file on every request
+_COOKIE_HEADER: Optional[dict] = None
+_COOKIE_LOADED = False
+
+def _cookies() -> dict:
+    global _COOKIE_HEADER, _COOKIE_LOADED
+    if not _COOKIE_LOADED:
+        _COOKIE_HEADER = _get_cookie_header()
+        _COOKIE_LOADED = True
+        if _COOKIE_HEADER:
+            logger.info("[cookies] Cookie header ready")
+        else:
+            logger.warning("[cookies] No cookies found — Shorts may fail")
+    return _COOKIE_HEADER or {}
+
 
 # ── Helpers ───────────────────────────────────────────────────────
 def _extract_video_id(text: str) -> Optional[str]:
@@ -86,119 +126,8 @@ def _fmt_size(b) -> str:
     if b >= 1_024:         return f"{b/1_024:.1f} KB"
     return f"{b} B"
 
-# ── yt-dlp extractor ──────────────────────────────────────────────
-def _ydl_opts(cookies_file: Optional[str] = None, *, player_clients: Optional[list] = None) -> dict:
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
-        "skip_download": True,
-        "noplaylist": True,
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        },
-    }
-    if player_clients:
-        opts["extractor_args"] = {
-            "youtube": {"player_client": player_clients},
-        }
-    if cookies_file:
-        opts["cookiefile"] = cookies_file
-        logger.info(f"[yt-dlp] Using cookies: {cookies_file}")
-    return opts
 
-
-def _extract_with_ytdlp(video_id: str) -> dict:
-    """Multi-strategy extraction with fallbacks for bot detection."""
-    import yt_dlp
-    cookies_file = _get_cookies_file()
-    url = f"https://www.youtube.com/watch?v={video_id}"
-
-    # Strategy list: (label, cookies, player_clients)
-    strategies = [
-        ("web_creator + cookies",   cookies_file, ["web_creator"]),
-        ("web_creator no-cookies",  None,         ["web_creator", "web"]),
-        ("tv_embedded no-cookies",  None,         ["tv_embedded"]),
-    ]
-
-    last_err = None
-    for label, cfile, clients in strategies:
-        logger.info(f"[yt-dlp] Trying strategy: {label}")
-        opts = _ydl_opts(cfile, player_clients=clients)
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=False)
-        except Exception as e:
-            last_err = e
-            err_str = str(e).lower()
-            if "sign in" in err_str or "bot" in err_str:
-                logger.warning(f"[yt-dlp] Strategy '{label}' hit bot detection, trying next…")
-                continue
-            # Non-bot error (private video, etc.) — don't retry
-            raise
-
-    # All strategies exhausted
-    raise last_err
-
-def _parse_ytdlp_formats(info: dict) -> tuple[list[dict], list[dict]]:
-    vfmts: list[dict] = []
-    afmts: list[dict] = []
-    seen:  set[str]   = set()
-
-    for f in info.get("formats", []):
-        url     = f.get("url")
-        if not url: continue
-        vcodec  = f.get("vcodec", "none")
-        acodec  = f.get("acodec", "none")
-        is_v    = vcodec != "none"
-        is_a    = acodec != "none"
-        height  = f.get("height")
-        fps     = int(f.get("fps") or 0)
-        bitrate = int(f.get("tbr") or 0) * 1000
-        fsize   = f.get("filesize") or f.get("filesize_approx") or None
-        ext     = f.get("ext", "mp4")
-        fmt_id  = str(f.get("format_id", ""))
-
-        if is_v and height:
-            lbl = f"{height}p" + (f"{fps}fps" if fps >= 48 else "")
-            if lbl in seen: continue
-            seen.add(lbl)
-            has_audio = is_a and acodec != "none"
-            vfmts.append({
-                "format_id": fmt_id,
-                "quality":   lbl,
-                "ext":       ext,
-                "height":    height,
-                "fps":       fps,
-                "bitrate":   bitrate,
-                "filesize":  _fmt_size(fsize),
-                "filesize_bytes": fsize,
-                "url":       url,
-                "has_audio": has_audio,
-                "mime":      f"video/{ext}",
-            })
-        elif not is_v and is_a:
-            abr = int(f.get("abr") or 0) * 1000
-            afmts.append({
-                "format_id": fmt_id,
-                "quality":   f"{round(abr/1000)} kbps" if abr else "audio",
-                "ext":       ext,
-                "bitrate":   abr,
-                "filesize":  _fmt_size(fsize),
-                "filesize_bytes": fsize,
-                "url":       url,
-                "mime":      f"audio/{ext}",
-            })
-
-    vfmts.sort(key=lambda x: -(x.get("height") or 0))
-    afmts.sort(key=lambda x: -(x.get("bitrate") or 0))
-    return vfmts, afmts
-
-# ── oEmbed fallback ───────────────────────────────────────────────
+# ── oEmbed ────────────────────────────────────────────────────────
 async def _fetch_oembed(video_id: str, http: httpx.AsyncClient) -> dict:
     for url_tmpl in [
         f"https://www.youtube.com/watch?v={video_id}",
@@ -214,6 +143,346 @@ async def _fetch_oembed(video_id: str, http: httpx.AsyncClient) -> dict:
             logger.warning(f"[oembed] {e}")
     return {}
 
+
+# ── InnerTube strategies ──────────────────────────────────────────
+async def _try_player(video_id: str, http: httpx.AsyncClient) -> Optional[dict]:
+    cookie_hdr = _cookies()
+    has_cookies = bool(cookie_hdr)
+
+    strategies = []
+
+    # ── IOS — bypasses PO token, works on datacenter/server IPs ──
+    strategies.append({
+        "name": "IOS",
+        "url":  _PLAYER_URL,
+        "payload": {
+            "videoId": video_id,
+            "context": {"client": {
+                "hl": "en", "gl": "US",
+                "clientName": "IOS",
+                "clientVersion": "19.45.4",
+                "deviceModel": "iPhone16,2",
+                "userAgent": "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1 like Mac OS X;)",
+                "osName": "iPhone",
+                "osVersion": "18.1.0.22B83",
+            }},
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1 like Mac OS X;)",
+            "X-YouTube-Client-Name": "5",
+            "X-YouTube-Client-Version": "19.45.4",
+            "Origin": "https://www.youtube.com",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    })
+
+    # ── ANDROID — another strong fallback for server IPs ─────────
+    strategies.append({
+        "name": "ANDROID",
+        "url":  _PLAYER_URL,
+        "payload": {
+            "videoId": video_id,
+            "context": {"client": {
+                "hl": "en", "gl": "US",
+                "clientName": "ANDROID",
+                "clientVersion": "19.44.38",
+                "androidSdkVersion": 34,
+                "userAgent": "com.google.android.youtube/19.44.38(Linux; U; Android 14; en_US) gzip",
+                "osName": "Android",
+                "osVersion": "14",
+            }},
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "com.google.android.youtube/19.44.38(Linux; U; Android 14; en_US) gzip",
+            "X-YouTube-Client-Name": "3",
+            "X-YouTube-Client-Version": "19.44.38",
+            "Origin": "https://www.youtube.com",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    })
+
+    # ── WEB+cookies — works if cookies are fresh ─────────────────
+    if has_cookies:
+        strategies.append({
+            "name": "WEB+cookies",
+            "url":  _PLAYER_URL,
+            "payload": {
+                "videoId": video_id,
+                "context": {"client": {
+                    "hl": "en", "gl": "US",
+                    "clientName": "WEB",
+                    "clientVersion": "2.20240726.00.00",
+                    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36,gzip(gfe)",
+                }},
+                "contentCheckOk": True,
+                "racyCheckOk":    True,
+            },
+            "headers": {
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "X-YouTube-Client-Name": "1",
+                "X-YouTube-Client-Version": "2.20240726.00.00",
+                "Origin":  "https://www.youtube.com",
+                "Referer": f"https://www.youtube.com/watch?v={video_id}",
+                "Accept-Language": "en-US,en;q=0.9",
+                **cookie_hdr,
+            },
+        })
+
+    # ── WEB_EMBEDDED ──────────────────────────────────────────────
+    strategies.append({
+        "name": "WEB_EMBEDDED",
+        "url":  _PLAYER_URL,
+        "payload": {
+            "videoId": video_id,
+            "context": {
+                "client": {"hl":"en","gl":"US","clientName":"WEB_EMBEDDED_PLAYER","clientVersion":"2.20231219.01.00"},
+                "thirdParty": {"embedUrl": "https://www.youtube.com/"},
+            },
+            "contentCheckOk": True, "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            "X-YouTube-Client-Name": "56",
+            "X-YouTube-Client-Version": "2.20231219.01.00",
+            "Origin":  "https://www.youtube.com",
+            "Referer": f"https://www.youtube.com/shorts/{video_id}",
+            **cookie_hdr,
+        },
+    })
+
+    # ── TV_EMBEDDED ───────────────────────────────────────────────
+    strategies.append({
+        "name": "TV_EMBEDDED",
+        "url":  _PLAYER_URL,
+        "payload": {
+            "videoId": video_id,
+            "context": {
+                "client": {"hl":"en","gl":"US","clientName":"TVHTML5_SIMPLY_EMBEDDED_PLAYER","clientVersion":"2.0"},
+                "thirdParty": {"embedUrl": "https://www.youtube.com/"},
+            },
+            "contentCheckOk": True, "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/538.1 Version/6.0 TV Safari/538.1",
+            "X-YouTube-Client-Name": "85",
+            "X-YouTube-Client-Version": "2.0",
+            "Origin":  "https://www.youtube.com",
+            "Referer": f"https://www.youtube.com/shorts/{video_id}",
+            **cookie_hdr,
+        },
+    })
+
+    # ── ANDROID_VR ───────────────────────────────────────────────
+    strategies.append({
+        "name": "ANDROID_VR",
+        "url":  f"{_PLAYER_URL}?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false",
+        "payload": {
+            "videoId": video_id,
+            "context": {"client": {"hl":"en","gl":"US","clientName":"ANDROID_VR","clientVersion":"1.57.29","androidSdkVersion":32}},
+            "contentCheckOk": True, "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "com.google.android.apps.youtube.vr.oculus/1.57.29 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+            "X-YouTube-Client-Name": "28",
+            "X-YouTube-Client-Version": "1.57.29",
+            "Origin":  "https://www.youtube.com",
+            "Referer": f"https://www.youtube.com/shorts/{video_id}",
+        },
+    })
+
+    # ── ANDROID_MUSIC ────────────────────────────────────────────
+    strategies.append({
+        "name": "ANDROID_MUSIC",
+        "url":  f"{_PLAYER_URL}?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false",
+        "payload": {
+            "videoId": video_id,
+            "context": {"client": {"hl":"en","gl":"US","clientName":"ANDROID_MUSIC","clientVersion":"6.42.52","androidSdkVersion":30}},
+            "contentCheckOk": True, "racyCheckOk": True,
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "com.google.android.apps.youtube.music/6.42.52 (Linux; U; Android 11) gzip",
+            "X-YouTube-Client-Name": "21",
+            "X-YouTube-Client-Version": "6.42.52",
+            "Origin":  "https://www.youtube.com",
+            "Referer": f"https://www.youtube.com/shorts/{video_id}",
+        },
+    })
+
+    for s in strategies:
+        try:
+            r = await http.post(s["url"], json=s["payload"], headers=s["headers"], timeout=15.0)
+            if r.status_code != 200:
+                logger.warning(f"[{s['name']}] HTTP {r.status_code}")
+                continue
+            data   = r.json()
+            status = data.get("playabilityStatus", {}).get("status", "")
+            logger.info(f"[{s['name']}] status={status}")
+            if status == "OK":
+                vf, af = _parse_formats(data)
+                if vf or af:
+                    logger.info(f"[{s['name']}] ✓ {len(vf)}V + {len(af)}A")
+                    return data
+                logger.warning(f"[{s['name']}] OK but no plain URLs (PO token required)")
+        except Exception as e:
+            logger.warning(f"[{s['name']}] {e}")
+
+    return None
+
+
+def _parse_formats(data: dict) -> tuple[list[dict], list[dict]]:
+    sd    = data.get("streamingData", {})
+    fmts  = sd.get("formats", []) + sd.get("adaptiveFormats", [])
+    vfmts: list[dict] = []
+    afmts: list[dict] = []
+    seen:  set[str]   = set()
+    for f in fmts:
+        url = f.get("url")
+        if not url: continue
+        mime    = f.get("mimeType", "")
+        is_v    = "video/" in mime
+        is_a    = "audio/" in mime
+        itag    = f.get("itag", 0)
+        height  = f.get("height")
+        fps     = int(f.get("fps") or 0)
+        bitrate = int(f.get("bitrate") or 0)
+        fsize   = int(f.get("contentLength") or 0) or None
+        if is_v and height:
+            lbl = f"{height}p" + (f"{fps}fps" if fps >= 48 else "")
+            if lbl in seen: continue
+            seen.add(lbl)
+            vfmts.append({"format_id":str(itag),"quality":lbl,
+                "ext":"mp4" if "mp4" in mime else "webm","height":height,
+                "fps":fps,"bitrate":bitrate,"filesize":_fmt_size(fsize),
+                "filesize_bytes":fsize,"url":url,"has_audio":False,"mime":mime})
+        elif is_v and not height:
+            lbl = {22:"720p",18:"360p",17:"240p",36:"240p"}.get(itag,"360p")
+            if lbl in seen: continue
+            seen.add(lbl)
+            vfmts.append({"format_id":str(itag),"quality":lbl,"ext":"mp4",
+                "height":int(lbl[:-1]),"fps":fps,"bitrate":bitrate,
+                "filesize":_fmt_size(fsize),"filesize_bytes":fsize,
+                "url":url,"has_audio":True,"mime":mime})
+        elif is_a:
+            abr = int(f.get("averageBitrate") or bitrate or 0)
+            afmts.append({"format_id":str(itag),
+                "quality":f"{round(abr/1000)} kbps" if abr else "audio",
+                "ext":"m4a" if "mp4a" in mime else "webm","bitrate":abr,
+                "filesize":_fmt_size(fsize),"filesize_bytes":fsize,
+                "url":url,"mime":mime})
+    vfmts.sort(key=lambda x: -(x.get("height") or 0))
+    afmts.sort(key=lambda x: -(x.get("bitrate") or 0))
+    return vfmts, afmts
+
+
+def _parse_ytdlp_formats(data: dict) -> tuple[list[dict], list[dict]]:
+    formats = data.get("formats", []) or []
+    vfmts: list[dict] = []
+    afmts: list[dict] = []
+
+    for f in formats:
+        url = f.get("url")
+        if not url:
+            continue
+
+        format_id = str(f.get("format_id") or "")
+        ext = str(f.get("ext") or "")
+        vcodec = str(f.get("vcodec") or "none")
+        acodec = str(f.get("acodec") or "none")
+        height = f.get("height")
+        fps = int(f.get("fps") or 0)
+        filesize_bytes = f.get("filesize") or f.get("filesize_approx")
+        bitrate = int(f.get("tbr") or 0)
+
+        if vcodec != "none":
+            quality = (f"{height}p" if height else (f.get("format_note") or f.get("resolution") or "video"))
+            if height and fps >= 48:
+                quality = f"{height}p{fps}fps"
+
+            mime_ext = "mp4" if ext in {"m4v", "mp4"} else (ext or "mp4")
+            vfmts.append({
+                "format_id": format_id,
+                "quality": quality,
+                "ext": ext or "mp4",
+                "height": int(height or 0) or None,
+                "fps": fps,
+                "bitrate": bitrate,
+                "filesize": _fmt_size(filesize_bytes),
+                "filesize_bytes": filesize_bytes,
+                "url": url,
+                "has_audio": acodec != "none",
+                "mime": f"video/{mime_ext}",
+            })
+            continue
+
+        if acodec != "none":
+            abr = int(f.get("abr") or bitrate or 0)
+            mime_ext = "mp4" if ext == "m4a" else (ext or "webm")
+            afmts.append({
+                "format_id": format_id,
+                "quality": f"{round(abr)} kbps" if abr else "audio",
+                "ext": ext or "m4a",
+                "bitrate": abr,
+                "filesize": _fmt_size(filesize_bytes),
+                "filesize_bytes": filesize_bytes,
+                "url": url,
+                "mime": f"audio/{mime_ext}",
+            })
+
+    vfmts.sort(key=lambda x: -(x.get("height") or 0))
+    afmts.sort(key=lambda x: -(x.get("bitrate") or 0))
+    return vfmts, afmts
+
+
+async def _yt_dlp_extract_with_oauth2(video_id: str) -> dict:
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    cmd = [
+        "yt-dlp",
+        "--dump-single-json",
+        "--no-playlist",
+        "--no-warnings",
+        "--username", "oauth2",
+        "--password", "",
+        "--",
+        video_url,
+    ]
+
+    logger.info("[yt-dlp] Trying OAuth2 mode")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError("yt-dlp OAuth2 timed out. Complete OAuth2 authorization and redeploy.")
+
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            "yt-dlp OAuth2 failed. Authorize yt-dlp OAuth2 first, then retry. "
+            f"Details: {err[:300]}"
+        )
+
+    try:
+        return json.loads(stdout.decode(errors="replace"))
+    except Exception as exc:
+        raise RuntimeError("yt-dlp returned invalid JSON output.") from exc
+
+
 # ── Public API ────────────────────────────────────────────────────
 async def get_video_info(video_id: str) -> dict:
     if not re.match(r'^[0-9A-Za-z_-]{11}$', video_id):
@@ -221,47 +490,44 @@ async def get_video_info(video_id: str) -> dict:
     if not video_id:
         raise ValueError("Invalid YouTube video ID or URL.")
 
-    import asyncio
-    loop = asyncio.get_event_loop()
-    try:
-        info = await loop.run_in_executor(None, _extract_with_ytdlp, video_id)
-    except Exception as e:
-        err = str(e)
-        logger.error(f"[yt-dlp] {err[:300]}")
-        if "private" in err.lower() or "removed" in err.lower():
+    async with httpx.AsyncClient(follow_redirects=True) as http:
+        oembed    = await _fetch_oembed(video_id, http)
+        title     = oembed.get("title", "")
+        channel   = oembed.get("author_name", "")
+        thumbnail = oembed.get("thumbnail_url", "")
+        if not title:
             raise RuntimeError("Video not found, private, or deleted.")
-        if "sign in" in err.lower() or "login" in err.lower():
-            raise RuntimeError("Age-restricted or members-only video.")
-        raise RuntimeError(f"Could not fetch stream URLs for this video.")
+        logger.info(f"[oembed] '{title[:50]}' by {channel}")
 
-    title     = info.get("title", "Untitled")
-    channel   = info.get("uploader", info.get("channel", "Unknown"))
-    thumbnail = info.get("thumbnail", "")
-    duration  = _fmt_duration(info.get("duration", 0))
-    views     = _fmt_views(info.get("view_count", 0))
+        data = await _try_player(video_id, http)
+        if not data:
+            raise RuntimeError(
+                "Could not fetch stream URLs. "
+                "For Shorts: add YouTube cookies to cookies.txt in the backend folder."
+            )
 
-    if not title:
-        raise RuntimeError("Video not found, private, or deleted.")
+        det      = data.get("videoDetails", {})
+        duration = _fmt_duration(det.get("lengthSeconds", 0))
+        views    = _fmt_views(det.get("viewCount", 0))
+        thumbs   = det.get("thumbnail", {}).get("thumbnails", [])
+        if thumbs: thumbnail = thumbs[-1]["url"]
+        vf, af   = _parse_formats(data)
 
-    logger.info(f"[yt-dlp] ✓ '{title[:50]}' by {channel}")
-
-    vf, af = _parse_ytdlp_formats(info)
-
-    return {
-        "video_id":      video_id,
-        "title":         title,
-        "channel":       channel,
-        "thumbnail":     thumbnail,
-        "duration":      duration,
-        "views":         views,
-        "video_formats": vf,
-        "audio_formats": [
-            {"format_id": "320kbps", "quality": "320 kbps", "ext": "mp3"},
-            {"format_id": "192kbps", "quality": "192 kbps", "ext": "mp3"},
-            {"format_id": "128kbps", "quality": "128 kbps", "ext": "mp3"},
-        ],
-        "_raw_audio": af,
-    }
+        return {
+            "video_id":      video_id,
+            "title":         title or det.get("title", "Untitled"),
+            "channel":       channel or det.get("author", "Unknown"),
+            "thumbnail":     thumbnail,
+            "duration":      duration,
+            "views":         views,
+            "video_formats": vf,
+            "audio_formats": [
+                {"format_id": "320kbps", "quality": "320 kbps", "ext": "mp3"},
+                {"format_id": "192kbps", "quality": "192 kbps", "ext": "mp3"},
+                {"format_id": "128kbps", "quality": "128 kbps", "ext": "mp3"},
+            ],
+            "_raw_audio": af,
+        }
 
 
 async def get_best_audio_url(video_id: str) -> tuple[str, str]:
@@ -270,49 +536,81 @@ async def get_best_audio_url(video_id: str) -> tuple[str, str]:
     if not video_id:
         raise ValueError("Invalid video ID.")
 
-    import asyncio
-    loop = asyncio.get_event_loop()
-    info = await loop.run_in_executor(None, _extract_with_ytdlp, video_id)
-    _, af = _parse_ytdlp_formats(info)
-    if not af: raise RuntimeError("No audio formats found.")
-    m4a = next((a for a in af if "m4a" in a.get("ext", "") or "mp4a" in a.get("mime", "")), None)
-    best = m4a or af[0]
-    return best["url"], best["mime"]
+    async with httpx.AsyncClient(follow_redirects=True) as http:
+        data = await _try_player(video_id, http)
+
+        if data:
+            _, af = _parse_formats(data)
+        else:
+            logger.warning("[audio] InnerTube failed, trying yt-dlp OAuth2 fallback")
+            ytdlp_data = await _yt_dlp_extract_with_oauth2(video_id)
+            _, af = _parse_ytdlp_formats(ytdlp_data)
+
+        if not af:
+            raise RuntimeError("No audio formats found.")
+
+        m4a = next((a for a in af if "mp4a" in a.get("mime", "") or a.get("ext") == "m4a"), None)
+        chosen = m4a or af[0]
+        mime = chosen.get("mime") or ("audio/mp4" if chosen.get("ext") == "m4a" else "audio/webm")
+        return chosen["url"], mime
 
 
 async def get_playlist_videos(playlist_id: str) -> list[dict]:
-    import asyncio, yt_dlp
-    cookies_file = _get_cookies_file()
-
-    def _fetch():
-        opts = {
-            **_ydl_opts(cookies_file),
-            "extract_flat": True,
-            "noplaylist": False,
+    async with httpx.AsyncClient(follow_redirects=True) as http:
+        cookie_hdr = _cookies()
+        payload = {
+            "browseId": f"VL{playlist_id}",
+            "context":  {"client": {"hl":"en","gl":"US","clientName":"WEB","clientVersion":"2.20240726.00.00"}},
         }
-        url = f"https://www.youtube.com/playlist?list={playlist_id}"
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            "X-YouTube-Client-Name": "1",
+            "X-YouTube-Client-Version": "2.20240726.00.00",
+            "Origin":  "https://www.youtube.com",
+            "Referer": "https://www.youtube.com/",
+            **cookie_hdr,
+        }
+        try:
+            r = await http.post(
+                "https://www.youtube.com/youtubei/v1/browse",
+                json=payload, headers=headers, timeout=20.0)
+            if r.status_code != 200:
+                raise RuntimeError(f"YouTube returned {r.status_code}")
+            data = r.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch playlist: {e}")
 
-    loop = asyncio.get_event_loop()
-    try:
-        info = await loop.run_in_executor(None, _fetch)
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch playlist: {e}")
+        videos: list[dict] = []
+        try:
+            contents = (
+                data.get("contents", {})
+                    .get("twoColumnBrowseResultsRenderer", {})
+                    .get("tabs", [{}])[0]
+                    .get("tabRenderer", {})
+                    .get("content", {})
+                    .get("sectionListRenderer", {})
+                    .get("contents", [{}])[0]
+                    .get("itemSectionRenderer", {})
+                    .get("contents", [{}])[0]
+                    .get("playlistVideoListRenderer", {})
+                    .get("contents", [])
+            )
+            for item in contents:
+                v = item.get("playlistVideoRenderer", {})
+                if not v: continue
+                vid_id = v.get("videoId", "")
+                if not vid_id: continue
+                title  = v.get("title", {}).get("runs", [{}])[0].get("text", "")
+                thumbs = v.get("thumbnail", {}).get("thumbnails", [])
+                thumb  = thumbs[-1]["url"] if thumbs else ""
+                length = v.get("lengthSeconds", "0")
+                owner  = (v.get("shortBylineText", {}).get("runs", [{}]) or [{}])[0].get("text", "")
+                videos.append({"video_id":vid_id,"title":title,
+                    "thumbnail":thumb,"duration":_fmt_duration(length),"channel":owner})
+        except Exception as e:
+            logger.warning(f"[playlist parse] {e}")
 
-    videos: list[dict] = []
-    for entry in info.get("entries", []):
-        if not entry: continue
-        vid_id = entry.get("id", "")
-        if not vid_id: continue
-        videos.append({
-            "video_id":  vid_id,
-            "title":     entry.get("title", ""),
-            "thumbnail": entry.get("thumbnail", ""),
-            "duration":  _fmt_duration(entry.get("duration", 0)),
-            "channel":   entry.get("uploader", entry.get("channel", "")),
-        })
-
-    if not videos:
-        raise RuntimeError("No videos found in playlist. It may be private or empty.")
-    return videos
+        if not videos:
+            raise RuntimeError("No videos found in playlist. It may be private or empty.")
+        return videos
