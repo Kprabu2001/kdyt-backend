@@ -37,8 +37,8 @@ async def get_info(
         ml = msg.lower()
         if "private" in ml or "deleted" in ml or "not found" in ml:
             raise HTTPException(status_code=400, detail="Video not found, private, or deleted.")
-        if "login" in ml or "age" in ml or "restricted" in ml:
-            raise HTTPException(status_code=400, detail="Age-restricted or members-only video.")
+        if "login" in ml or "age" in ml or "restricted" in ml or "sign in" in ml or "bot" in ml:
+            raise HTTPException(status_code=503, detail="YouTube blocked this request (bot detection). Try again or refresh cookies.")
         raise HTTPException(status_code=502, detail="Unable to fetch video. Please try again later.")
     except Exception as exc:
         logger.error(f"[info] unexpected: {repr(exc)}")

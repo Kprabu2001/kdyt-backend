@@ -13,15 +13,22 @@ logger = logging.getLogger(__name__)
 
 _OEMBED_URL = "https://www.youtube.com/oembed"
 
-# ── Cookie support ────────────────────────────────────────────────
+# ── Cookie support (cached) ───────────────────────────────────────
+_cached_cookies_path: Optional[str] = None
+
 def _get_cookies_file() -> Optional[str]:
-    """Return path to a valid cookies.txt file, or None."""
+    """Return path to a valid cookies.txt file, or None.  Cached after first call."""
+    global _cached_cookies_path
+    if _cached_cookies_path and os.path.isfile(_cached_cookies_path):
+        return _cached_cookies_path
+
     # Method 1: explicit file path
     path = os.environ.get("YOUTUBE_COOKIES_FILE", "")
     if path and os.path.isfile(path):
+        _cached_cookies_path = path
         return path
 
-    # Method 2: base64 env var → write to temp file
+    # Method 2: base64 env var → write to temp file ONCE
     b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
     if b64:
         try:
@@ -31,12 +38,14 @@ def _get_cookies_file() -> Optional[str]:
             tmp.write(txt)
             tmp.close()
             logger.info(f"[cookies] Wrote cookies from B64 env to {tmp.name}")
+            _cached_cookies_path = tmp.name
             return tmp.name
         except Exception as e:
             logger.warning(f"[cookies] B64 decode failed: {e}")
 
     # Method 3: cookies.txt in working directory
     if os.path.isfile("cookies.txt"):
+        _cached_cookies_path = "cookies.txt"
         return "cookies.txt"
 
     return None
@@ -78,7 +87,7 @@ def _fmt_size(b) -> str:
     return f"{b} B"
 
 # ── yt-dlp extractor ──────────────────────────────────────────────
-def _ydl_opts(cookies_file: Optional[str] = None) -> dict:
+def _ydl_opts(cookies_file: Optional[str] = None, *, relaxed: bool = False) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -86,7 +95,17 @@ def _ydl_opts(cookies_file: Optional[str] = None) -> dict:
         "skip_download": True,
         "noplaylist": True,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        },
+        # Use the web client + enable PO token plugin if installed
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web"] if not relaxed else ["mweb", "web"],
+            },
         },
     }
     if cookies_file:
@@ -94,14 +113,28 @@ def _ydl_opts(cookies_file: Optional[str] = None) -> dict:
         logger.info(f"[yt-dlp] Using cookies: {cookies_file}")
     return opts
 
+
 def _extract_with_ytdlp(video_id: str) -> dict:
+    """Try extraction; on bot-detection error, retry once with relaxed options."""
     import yt_dlp
     cookies_file = _get_cookies_file()
     url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # First attempt — normal options
     opts = _ydl_opts(cookies_file)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return info
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as first_err:
+        err_str = str(first_err).lower()
+        if "sign in" not in err_str and "bot" not in err_str:
+            raise  # not a bot-detection error, don't retry
+
+    # Retry — relaxed options (mweb fallback, no cookies)
+    logger.warning(f"[yt-dlp] Bot-detection on first try, retrying with relaxed opts…")
+    retry_opts = _ydl_opts(cookies_file, relaxed=True)
+    with yt_dlp.YoutubeDL(retry_opts) as ydl:
+        return ydl.extract_info(url, download=False)
 
 def _parse_ytdlp_formats(info: dict) -> tuple[list[dict], list[dict]]:
     vfmts: list[dict] = []
